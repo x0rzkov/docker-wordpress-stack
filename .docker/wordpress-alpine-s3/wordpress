@@ -1,0 +1,29 @@
+server { 
+  listen 8000;
+
+  root /var/www/html; 
+	 
+  access_log /var/www/logs/access.log; 
+  error_log /var/www/logs/error.log; 
+
+  location / { 
+    root /var/www/html; 
+    index index.php index.html index.htm; 
+    
+    try_files $uri $uri/ /index.php;
+  } 
+  
+  location ~ .php$ { 
+    include /etc/nginx/fastcgi_params;
+    fastcgi_pass   127.0.0.1:9000;
+    fastcgi_index  index.php;
+    fastcgi_param SCRIPT_FILENAME $request_filename;
+    fastcgi_param PATH_INFO $fastcgi_script_name;
+  } 
+
+  location ~ ^/(status|ping)$ {
+    allow all;
+    include /etc/nginx/fastcgi_params;
+    fastcgi_pass localhost:9000;
+  }
+} 

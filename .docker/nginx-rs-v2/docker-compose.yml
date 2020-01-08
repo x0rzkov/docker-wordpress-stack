@@ -1,0 +1,9 @@
+version: "3.7"
+services:
+  nginx:
+    image: romanoffs/rs-nginx:latest
+    ports:
+      - 8000:80
+    volumes:
+      - ./conf:/etc/nginx/
+    container_name: nginx

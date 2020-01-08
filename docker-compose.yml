@@ -1,0 +1,384 @@
+---
+version: "3.7"
+services:
+
+  nginx:
+    image: nginx-rs:latest
+    build: .docker/nginx-rs
+    container_name: ${NAMESPACE}_nginx
+    ports:
+    - "8080:80"
+    - "443:443"
+    networks:
+    - web
+    - internal
+    - proxy-tier
+    links:
+    - wordpress:wordpress
+    - adminer:adminer
+    - phpmyadmin:phpmyadmin
+    # - kibana:kibana
+    # - elasticsearch:elasticsearch
+    volumes:
+    - ${NGINX_CONF_DIR:-./nginx}:/etc/nginx/conf.d
+    - ${NGINX_LOG_DIR:-./logs/nginx}:/var/log/nginx
+    - ${WORDPRESS_DATA_DIR:-./wordpress}:/var/www/html
+    - ${SSL_CERTS_DIR:-./certs}:/etc/letsencrypt
+    - ${SSL_CERTS_DATA_DIR:-./certs-data}:/data/letsencrypt
+    - .htpasswd:/etc/nginx/htpasswd/.htpasswd
+    - ./data/nginx/geoip2/:/usr/share/geoip/
+    - ./.config/nginx-conf/nginx.conf:/etc/nginx/nginx.conf
+    - ./.config/nginx-conf/anti_ddos_challenge.lua:/etc/nginx/anti_ddos_challenge.lua
+    restart: always
+
+  wordpress:
+    build: .docker/wordpress
+    # build: .docker/wordpress-fpm-alpine
+    image: eedama2/wordpress:latest
+    container_name: ${NAMESPACE}_wordpress
+    networks:
+    - internal
+    volumes:
+    - ./.config/php/conf.ini:/usr/local/etc/php/conf.d/conf.ini
+    - ./shared/www:/var/www/html
+    - ./.config/php-fpm/custom.conf:/usr/local/etc/php-fpm.d/www.conf
+    environment:
+    - WORDPRESS_DB_NAME=${WORDPRESS_DB_NAME:-wordpress}
+    - WORDPRESS_TABLE_PREFIX=${WORDPRESS_TABLE_PREFIX:-wp_}
+    - WORDPRESS_DB_HOST=${WORDPRESS_DB_HOST:-mysql}
+    - WORDPRESS_DB_USER=${WORDPRESS_DB_USER:-root}
+    - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD:-password}
+    depends_on:
+    - mysql
+    - memcached
+    # - elasticsearch
+    links:
+    - memcached:memcached
+    - redis:redis
+    # - elasticsearch:elasticsearch
+    restart: always
+
+  mysql:
+    image: mariadb:${MARIADB_VERSION:-latest}
+    container_name: ${NAMESPACE}_mysql
+    networks:
+    - internal
+    - web
+    ports :
+    - "3306:3306"
+    volumes:
+    - db-data:/var/lib/mysql
+    environment:
+    - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-password}
+    - MYSQL_USER=${MYSQL_USER:-root}
+    - MYSQL_PASSWORD=${MYSQL_PASSWORD:-password}
+    - MYSQL_DATABASE=${MYSQL_DATABASE:-wordpress}
+    restart: always
+    command: --max_allowed_packet=65011712 # Set max_allowed_packet to 512M (or any other value)
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: ${NAMESPACE}_pma
+    restart: always
+    ports :
+    - "8082:80"
+    links:
+    - mysql:mysql
+    networks:
+    - internal
+    - web
+    environment:
+    - PMA_ARBITRARY=1
+    - PMA_PORT=3306
+    - PMA_HOSTS=mysql
+    - UPLOAD_LIMIT=65536536
+    - MYSQL_ROOT_PASSWORD=password
+    # - PMA_USER=${WORDPRESS_DB_USER}
+    # - PMA_PASSWORD=${WORDPRESS_DB_PASSWORD}
+
+  backup:
+    image: zeenlym/mariadb-backup
+    container_name: ${NAMESPACE}_backup
+    depends_on:
+    - mysql
+    restart: unless-stopped
+    networks:
+    - internal
+    labels:
+    - "traefik.enable=false"
+    environment:
+    - TIMEZONE=${TIME_ZONE}
+    - SCHEDULE=0 0 3 * *
+    - BACKUP_METHOD=mysqldump
+    - MYSQL_HOST=mysql
+    - MYSQL_DATABASE=${WORDPRESS_DB_NAME}
+    - MYSQL_USER=${WORDPRESS_DB_USER}
+    - MYSQL_PASSWORD=${WORDPRESS_DB_PASSWORD}
+    volumes:
+    - ${MYSQL_BACKUP_DIR}:/backup
+    # restart: always
+
+  #traefik:
+  #  image: traefik:latest
+  #  networks:
+  #  - internal
+  #  - web
+  #  container_name: ${NAMESPACE}_traefik
+  #  ports:
+  #  - "81:80"
+  #  - "8085:8080"
+  #  volumes:
+  #  - /var/run/docker.sock:/var/run/docker.sock
+  #  - ${TRAFIK_CONFIG_DIR}/traefik.toml:/traefik.toml
+  #  - ${TRAFIK_CONFIG_DIR}/acme.json:/acme.json
+    # restart: always
+
+  mailhog:
+    container_name: ${NAMESPACE}_mailhog
+    image: mailhog/mailhog:latest
+    ports:
+    - ${MAILHOG_EXTERNAL_PORT}:8025
+    networks:
+    - internal
+    - web
+    # restart: always
+
+  adminer:
+    image: adminer
+    container_name: ${NAMESPACE}_adminer
+    restart: always
+    networks:
+    - internal
+    - web
+    links:
+    - mysql
+    ports:
+    - 8081:8080
+    # restart: always
+
+  memcached:
+    image: memcached:alpine
+    container_name: ${NAMESPACE}_memcached 
+    # restart: always
+    ports:
+    - "11211:11211"
+    networks:
+    - internal
+    command: -m 1024
+    restart: always
+
+  varnish:
+    image: million12/varnish
+    container_name: ${NAMESPACE}_varnish 
+    restart: always
+    environment:
+      CACHE_SIZE: 128m
+    links:
+    - nginx
+    volumes:
+    - ./.config/varnish/default.vcl:/etc/varnish/default.vcl
+    ports:
+    - "80:80"
+    # - "443:443"
+    networks:
+    - internal
+
+  redis:
+    image: redis:5-alpine
+    container_name: ${NAMESPACE}_redis 
+    restart: always
+    ports:
+    - "6379:6379"
+    networks:
+    - internal
+
+  #sftp:
+  #  image: delfer/alpine-ftp-server
+  #  container_name: ${NAMESPACE}_sftp
+  #  ports:
+  #  - "21:21"
+  #  - "21000-21010:21000-21010"
+  #  volumes:
+  #  - ./shared/www:/var/www/html
+  #  environment:
+  #    USERS: eedamaftp|password|/var/www/html|10000 
+  #    ADDRESS: sftp.eedama.org
+  #    MIN_PORT: 21000
+  #    MAX_PORT: 21010
+
+  #portainer:
+  #  image: portainer/portainer
+  #  container_name: ${NAMESPACE}_portainer
+  #  restart: always
+  #  volumes:
+  #  - /var/run/docker.sock:/var/run/docker.sock
+  #  - portainer-data:/data
+  #  ports:
+  #  - 9001:9000
+  #  labels:
+  #  - "traefik.backend=portainer"
+  #  - "traefik.frontend.rule=Host:portainer.eedana.org"
+  #  - "traefik.enable=true"
+  #  - "traefik.port=9000"
+  #  - "traefik.tags=ui"
+  #  command: --no-analytics --no-auth -H unix:///var/run/docker.sock
+  #  networks:
+  #  - internal
+  #  - web
+
+  #coredns: 
+  #  image: coredns/coredns
+  #  container_name: ${NAMESPACE}_coredns
+  #  restart: always
+  #  command: -conf /etc/coredns/Corefile
+  #  ports:
+  #  - 53:53/udp
+  #  volumes:
+  #  - .config/dns/:/etc/coredns
+  #  labels:
+  #  - "traefik.enable=false"      
+  #  network_mode: host 
+
+  #unbound-app:
+  #  container_name: ${NAMESPACE}_unbound  
+    # restart: always
+  #  image: tiredofit/unbound
+  #  ports:
+  #  - 153:53
+  #  environment:
+  #  - ZABBIX_HOSTNAME=unbound-hostname-app
+  #  - DO_IPV6=yes
+  #  - DO_IPV4=yes
+  #  - DO_UDP=yes
+  #  - DO_TCP=yes
+  #  - VERBOSITY=0
+  #  - NUM_THREADS=1
+  #  - SO_RCVBUFF=0
+  #  - SO_SNDBUF=0
+  #  - SO_REUSEPORT=no
+  #  - EDNS_BUFFER_SIZE=4096
+  #  - MSG_CACHE_SIZE=4m
+  #  - RRSET_CACHE_SIZE=4m
+  #  - CACHE_MIN_TTL=0
+  #  - CACHE_MAX_TTL=86400
+  #  - CACHE_MAX_NEGATIVE_TTL=3600
+  #  - HIDE_IDENTITY=no
+  #  - HIDE_VERSION=no
+  #  - STATISTICS_INTERVAL=0
+  #  - STATISTICS_CUMULATIVE=no
+  #  - EXTENDED_STATISTICS=no
+  #  networks:
+  #  - proxy-tier
+  #  restart: always
+
+  # sftp:
+  #   image: atmoz/sftp:alpine
+  #   ports:
+  #   - "2222:22"
+  #   volumes:
+  #   - app:/var/www/html
+  #   command: eedamaftp:password:1000
+
+  tests:
+    image: tests:alpine3.11
+    build: .docker/tests
+    container_name: ${NAMESPACE}_tests 
+    depends_on:
+    - redis
+    - memcached
+    - varnish
+    links:
+    - memcached
+    - redis
+    - varnish
+    networks:
+    - internal
+
+  #elasticsearch:
+  #  restart: always
+  #  build:
+  #    context: ./.docker/elasticsearch
+  #    args:
+  #      TZ: ${TIME_ZONE}
+  #      CEREBRO_VERSION: ${CEREBRO_VERSION}
+  #  container_name: ${NAMESPACE}_elasticsearch
+  #  image: ${NAMESPACE}/elasticsearch:7.0.1
+  #  environment:
+  #  - bootstrap.memory_lock=true
+  #  - xpack.security.enabled=false
+  #  - ES_JAVA_OPTS=-Xms1g -Xmx1g
+  #  - http.host=0.0.0.0
+  #  - transport.host=127.0.0.1
+  #  ports:
+  #  - '9200:9200'
+  #  - '9300:9300'
+  #  - '9000:9000'
+  #  ulimits:
+  #    memlock:
+  #      soft: -1
+  #      hard: -1
+  #    nofile:
+  #      soft: 262144
+  #      hard: 262144
+  #  cap_add:
+  #  - IPC_LOCK
+  #  volumes:
+  #  - elastic_data:/usr/share/elasticsearch/data
+  #  networks:
+  #  - internal
+  #  entrypoint: /usr/share/elasticsearch/start
+
+  #kibana:
+  #  image: docker.elastic.co/kibana/kibana:7.5.0
+  #  container_name: ${NAMESPACE}_kibana
+  #  ports:
+  #  - 5601:5601
+  #  networks:
+  #  - internal
+  #  - web
+  #  restart: always
+
+  #tor-privoxy:
+  #  restart: always
+  #  container_name: ${NAMESPACE}_torp
+  #  image: dockage/tor-privoxy:latest
+  #  ports:
+  #  - "9050:9050" # Tor proxy
+  #  - "9051:9051" # Tor control port
+  #  - "8118:8118" # Privoxy
+
+  imaginary:
+    image: h2non/imaginary:latest
+    container_name: ${NAMESPACE}_imaginary
+    volumes:
+    - imaginary-data:/mnt/data
+    environment:
+       PORT: 9002
+    ports:
+    - "9002:9002"
+    command: -cors -gzip -enable-url-source -mount /mnt/data
+    networks:
+    - internal
+    - web
+    restart: always
+
+networks:
+  internal:
+  web:
+    external: true
+  proxy-tier:
+    external:
+      name: nginx-proxy
+
+volumes:
+  db-data:
+  letsencrypt_certs:
+  imaginary-data:
+  portainer-data:
+  letsencrypt_www:
+  elastic_data:
+  app_data:
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/shared/www

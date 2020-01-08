@@ -1,0 +1,6 @@
+*.pem
+*.crt
+*.key
+*.ini
+*.ORIG
+*.swp

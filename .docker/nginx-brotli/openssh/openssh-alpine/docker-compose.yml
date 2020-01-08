@@ -1,0 +1,9 @@
+version: "3.4"
+services:
+    openssh:
+        image: harshavardhanj/openssh
+        ports:
+            - "2222:22"
+        environment:
+            - USER=example
+            - PASSWORD=example

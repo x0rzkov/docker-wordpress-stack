@@ -1,0 +1,243 @@
+---
+version: "3.7"
+services:
+
+  # refs.
+  # - https://github.com/yobasystems/alpine-php-wordpress
+  # - 
+
+  nginx:
+    image: nginx:${NGINX_VERSION:-latest}
+    container_name: ${NAMESPACE}_nginx
+    ports:
+    - "8080:80"
+    - "443:443"
+    networks:
+    - web
+    - internal
+    links:
+    - wordpress:wordpress
+    - adminer:adminer
+    - phpmyadmin:phpmyadmin
+    volumes:
+    - ${NGINX_CONF_DIR:-./nginx}:/etc/nginx/conf.d
+    - ${NGINX_LOG_DIR:-./logs/nginx}:/var/log/nginx
+    - ${WORDPRESS_DATA_DIR:-./wordpress}:/var/www/html
+    - ${SSL_CERTS_DIR:-./certs}:/etc/letsencrypt
+    - ${SSL_CERTS_DATA_DIR:-./certs-data}:/data/letsencrypt
+    - .htpasswd:/etc/nginx/htpasswd
+    restart: always
+
+  wordpress:
+    build: .docker/wordpress
+    # build: .docker/wordpress-fpm-alpine
+    image: eedama2/wordpress:latest
+    container_name: ${NAMESPACE}_wordpress
+    networks:
+    - internal
+    volumes:
+    - ./.config/php/conf.ini:/usr/local/etc/php/conf.d/conf.ini
+    - ./shared/www:/var/www/html
+    environment:
+    - WORDPRESS_DB_NAME=${WORDPRESS_DB_NAME:-wordpress}
+    - WORDPRESS_TABLE_PREFIX=${WORDPRESS_TABLE_PREFIX:-wp_}
+    - WORDPRESS_DB_HOST=${WORDPRESS_DB_HOST:-mysql}
+    - WORDPRESS_DB_USER=${WORDPRESS_DB_USER:-root}
+    - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD:-password}
+    depends_on:
+    - mysql
+    - memcached
+    - elasticsearch
+    links:
+    - memcached:memcached
+    - elasticsearch:elasticsearch
+    restart: always
+
+  mysql:
+    image: mariadb:${MARIADB_VERSION:-latest}
+    container_name: ${NAMESPACE}_mysql
+    networks:
+    - internal
+    - web
+    ports :
+    - "3306:3306"
+    volumes:
+    - db-data:/var/lib/mysql
+    environment:
+    - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-password}
+    - MYSQL_USER=${MYSQL_USER:-root}
+    - MYSQL_PASSWORD=${MYSQL_PASSWORD:-password}
+    - MYSQL_DATABASE=${MYSQL_DATABASE:-wordpress}
+    restart: always
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: ${NAMESPACE}_pma
+    restart: always
+    ports :
+    - "8082:80"
+    links:
+    - mysql:mysql
+    networks:
+    - internal
+    - web
+    environment:
+    - PMA_ARBITRARY=1
+    - PMA_PORT=3306
+    - PMA_HOSTS=mysql
+    - UPLOAD_LIMIT=65536536
+    - MYSQL_ROOT_PASSWORD=password
+    # - PMA_USER=${WORDPRESS_DB_USER}
+    # - PMA_PASSWORD=${WORDPRESS_DB_PASSWORD}
+
+  backup:
+    image: zeenlym/mariadb-backup
+    container_name: ${NAMESPACE}_backup
+    depends_on:
+    - mysql
+    restart: unless-stopped
+    networks:
+    - internal
+    labels:
+    - "traefik.enable=false"
+    environment:
+    - TIMEZONE=${TIME_ZONE}
+    - SCHEDULE=0 0 3 * *
+    - BACKUP_METHOD=mysqldump
+    - MYSQL_HOST=mysql
+    - MYSQL_DATABASE=${WORDPRESS_DB_NAME}
+    - MYSQL_USER=${WORDPRESS_DB_USER}
+    - MYSQL_PASSWORD=${WORDPRESS_DB_PASSWORD}
+    volumes:
+    - ${MYSQL_BACKUP_DIR}:/backup
+
+  traefik:
+    image: traefik:latest
+    networks:
+    - internal
+    - web
+    container_name: ${NAMESPACE}_traefik
+    ports:
+    - "81:80"
+    - "8085:8080"
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ${TRAFIK_CONFIG_DIR}/traefik.toml:/traefik.toml
+    - ${TRAFIK_CONFIG_DIR}/acme.json:/acme.json
+
+  mailhog:
+    container_name: ${NAMESPACE}_mailhog
+    image: mailhog/mailhog:latest
+    ports:
+    - ${MAILHOG_EXTERNAL_PORT}:8025
+    networks:
+    - internal
+    - web
+
+  adminer:
+    image: adminer
+    container_name: ${NAMESPACE}_adminer
+    restart: always
+    networks:
+    - internal
+    - web
+    links:
+    - mysql
+    ports:
+    - 8081:8080
+
+  memcached:
+    image: memcached:alpine
+    container_name: ${NAMESPACE}_memcached 
+    restart: always
+    ports:
+    - "11211:11211"
+    networks:
+    - internal
+    - web
+
+  varnish:
+    image: million12/varnish
+    container_name: ${NAMESPACE}_varnish 
+    restart: always
+    environment:
+      CACHE_SIZE: 128m
+    links:
+    - nginx
+    volumes:
+    - ./.config/varnish/default.vcl:/etc/varnish/default.vcl
+    ports:
+    - "80:80"
+    # - "443:443"
+    networks:
+    - internal
+    - web
+
+  redis:
+    image: redis:5-alpine
+    container_name: ${NAMESPACE}_redis 
+    restart: always
+    ports:
+    - "6379:6379"
+    networks:
+    - internal    
+    - web
+
+  portainer:
+    image: portainer/portainer
+    container_name: "${NAMESPACE}_portainer"
+    command: --no-auth -H unix:///var/run/docker.sock
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+    - "traefik.http.routers.${NAMESPACE}_portainer.rule=Host(`portainer.${PROJECT_BASE_URL}`)"
+
+  traefik:
+    image: traefik:v2.0
+    container_name: "${NAMESPACE}_traefik"
+    command: --api.insecure=true --providers.docker
+    ports:
+    - '8000:80'
+    - '8085:8080' # Dashboard
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+
+  elasticsearch:
+    build:
+      context: ./.docker/elasticsearch
+      args:
+        TZ: ${TIME_ZONE}
+        CEREBRO_VERSION: ${CEREBRO_VERSION}
+    container_name: ${NAMESPACE}_elasticsearch
+    image: ${NAMESPACE}/elasticsearch:7.5.0
+    environment:
+    - bootstrap.memory_lock=true
+    - xpack.security.enabled=false
+    - ES_JAVA_OPTS=-Xms1024m -Xmx1024m
+    - http.host=0.0.0.0
+    - transport.host=127.0.0.1
+    ports:
+    - '9200:9200'
+    - '8086:8086'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+    - elastic_data:/usr/share/elasticsearch/data
+    networks:
+    - internal
+    - web
+
+networks:
+  internal:
+  web:
+    external: true
+
+volumes:
+  db-data:
+  letsencrypt_certs:
+  letsencrypt_www:
+  elastic_data:
+  app_data:
+    external: true
